@@ -28,9 +28,15 @@ def round_small_elements(tensor, threshold):
     return new_tensor
 
 
-def normalize_loss(loss):
-    scale = loss.std(unbiased=False).clamp_min(1e-6)
-    return (loss - loss.mean()) / scale
+def relative_goal_loss(candidate_loss, reference_loss, eps=1e-6):
+    """Normalize candidate goal loss by the current state's goal loss.
+
+    The reference loss is computed once at the start of each MPC/CEM solve and
+    kept fixed across all CEM iterations. A value of 1.0 therefore means the
+    candidate is predicted to be as far from the goal as the current state,
+    values below 1.0 indicate progress, and values above 1.0 indicate regression.
+    """
+    return candidate_loss / reference_loss.clamp_min(eps)
 
 
 def weighted_elite_stats(actions, loss, indices, temperature=0.25):
@@ -142,6 +148,7 @@ def cem(
     generator=None,
     log=False,
     elite_temperature=0.5,
+    relative_loss_eps=1e-6,
 ):
     """
     :param context_obs: {"left": [H, W, 3], "wrist": [H, W, 3]}
@@ -200,6 +207,7 @@ def cem(
                 pose_traj,
                 plot=False,
             )
+
             next_frame_side = next_frame["left"]
             next_frame_wrist = next_frame["wrist"]
 
@@ -210,8 +218,13 @@ def cem(
 
         return action_traj, frame_traj_side, frame_traj_wrist
 
-    def select_topk_action_traj(final_state_side, goal_state_side,
-                                final_state_wrist, goal_state_wrist, actions):
+    def select_topk_action_traj(current_state_side,
+                                current_state_wrist,
+                                final_state_side, 
+                                goal_state_side,
+                                final_state_wrist,
+                                goal_state_wrist, 
+                                actions):
         """Select separate elite sets for action subspaces.
 
         The side camera is used to rank candidates for xyz translation, while
@@ -221,17 +234,49 @@ def cem(
         loss_side = l1(final_state_side.flatten(1), goal_state_side.flatten(1))
         loss_wrist = l2(final_state_wrist.flatten(1), goal_state_wrist.flatten(1))
 
-        rank_loss_side = normalize_loss(loss_side) 
-        rank_loss_wrist = normalize_loss(loss_wrist) 
+        reference_loss_side = l1(current_state_side.flatten(1), goal_state_side.flatten(1))
+        reference_loss_wrist = l2(current_state_wrist.flatten(1), goal_state_wrist.flatten(1))
 
-        loss = 0.5 * rank_loss_side + 0.5 * rank_loss_wrist
+        # Scale each view by its own current-to-goal loss. These reference
+        # values are fixed for the entire CEM solve, so both view costs become
+        # dimensionless and have the same interpretation:
+        #   1.0  -> no predicted progress relative to the current state
+        #   <1.0 -> predicted progress toward the goal
+        #   >1.0 -> predicted movement away from the goal
+        relative_loss_side = relative_goal_loss(
+            loss_side, reference_loss_side, eps=relative_loss_eps
+        )
+        relative_loss_wrist = relative_goal_loss(
+            loss_wrist, reference_loss_wrist, eps=relative_loss_eps
+        )
+
+        # Keep equal view weights for now. Adaptive reliability weighting can
+        # be added later on top of these scale-normalized costs.
+        loss = 0.5 * relative_loss_side + 0.5 * relative_loss_wrist
 
         indices = loss.topk(topk, largest=False).indices
+        selected_actions = actions[indices]
+        return selected_actions
 
-        mean, std = weighted_elite_stats(
-            actions, loss, indices, temperature=elite_temperature
+
+    # Compute each view's current-to-goal loss ONCE before expanding to the
+    # CEM sample batch. These fixed reference losses remove the side/wrist
+    # scale mismatch without depending on the sampled action distribution.
+    reference_loss_side = l1(
+        context_frame["left"].flatten(1),
+        goal_frame_side.flatten(1),
+    ).mean().detach()
+    reference_loss_wrist = l2(
+        context_frame["wrist"].flatten(1),
+        goal_frame_wrist.flatten(1),
+    ).mean().detach()
+
+    if verbose:
+        logger.info(
+            "CEM reference goal losses | side=%.6f wrist=%.6f",
+            reference_loss_side.item(),
+            reference_loss_wrist.item(),
         )
-        return mean, std
 
     # INPUTS
     context_obs_side = context_obs["left"].repeat(samples, 1, 1, 1) # Reshape to [S, 3, H, W]
@@ -273,16 +318,18 @@ def cem(
         action_traj, frame_traj_side, frame_traj_wrist = sample_action_traj()
 
         # compute distance between final frame and each goal frame
-        (
-            mean_selected_actions,
-            std_selected_actions,
-        ) = select_topk_action_traj(
+        selected_actions = select_topk_action_traj(
+            current_state_side=context_frame["left"][:, -1],
+            current_state_wrist=context_frame["wrist"][:, -1],
             final_state_side=frame_traj_side[:, -1],
             goal_state_side=goal_frame_side,
             final_state_wrist=frame_traj_wrist[:, -1],
             goal_state_wrist=goal_frame_wrist,
             actions=action_traj,
         )
+
+        mean_selected_actions = selected_actions.mean(dim=0)
+        std_selected_actions = selected_actions.std(dim=0)
 
         # -- Update new sampling mean and std based on the top-k samples
         mean = torch.cat(
