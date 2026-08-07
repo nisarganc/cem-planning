@@ -137,7 +137,7 @@ def cem(
     momentum_std_gripper=0.15,
     samples=100,
     topk=10,
-    verbose=False,
+    verbose=True,
     maxnorm=0.05,
     maxrotnorm=0.314,
     axis={},
@@ -218,8 +218,8 @@ def cem(
 
         return action_traj, frame_traj_side, frame_traj_wrist
 
-    def select_topk_action_traj(current_state_side,
-                                current_state_wrist,
+    def select_topk_action_traj(reference_loss_side,
+                                reference_loss_wrist,
                                 final_state_side, 
                                 goal_state_side,
                                 final_state_wrist,
@@ -233,9 +233,6 @@ def cem(
         """
         loss_side = l1(final_state_side.flatten(1), goal_state_side.flatten(1))
         loss_wrist = l2(final_state_wrist.flatten(1), goal_state_wrist.flatten(1))
-
-        reference_loss_side = l1(current_state_side.flatten(1), goal_state_side.flatten(1))
-        reference_loss_wrist = l2(current_state_wrist.flatten(1), goal_state_wrist.flatten(1))
 
         # Scale each view by its own current-to-goal loss. These reference
         # values are fixed for the entire CEM solve, so both view costs become
@@ -252,6 +249,14 @@ def cem(
 
         # Keep equal view weights for now. Adaptive reliability weighting can
         # be added later on top of these scale-normalized costs.
+        if verbose:
+            # min, mean, max values for each view's relative loss
+            logger.info(
+                "CEM candidate side losses:", relative_loss_side.min().item(), relative_loss_side.mean().item(), relative_loss_side.max().item())
+
+            logger.info(
+                "CEM candidate wrist losses:", relative_loss_wrist.min().item(), relative_loss_wrist.mean().item(), relative_loss_wrist.max().item())
+
         loss = 0.5 * relative_loss_side + 0.5 * relative_loss_wrist
 
         indices = loss.topk(topk, largest=False).indices
@@ -319,8 +324,8 @@ def cem(
 
         # compute distance between final frame and each goal frame
         selected_actions = select_topk_action_traj(
-            current_state_side=context_frame["left"][:, -1],
-            current_state_wrist=context_frame["wrist"][:, -1],
+            reference_loss_side=reference_loss_side,
+            reference_loss_wrist=reference_loss_wrist,
             final_state_side=frame_traj_side[:, -1],
             goal_state_side=goal_frame_side,
             final_state_wrist=frame_traj_wrist[:, -1],
