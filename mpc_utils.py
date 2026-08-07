@@ -252,10 +252,18 @@ def cem(
         if verbose:
             # min, mean, max values for each view's relative loss
             logger.info(
-                "CEM candidate side losses:", relative_loss_side.min().item(), relative_loss_side.mean().item(), relative_loss_side.max().item())
+                f"CEM candidate predicted side losses:"
+                f"min={relative_loss_side.min().item()}"
+                f"mean={relative_loss_side.mean().item()}"
+                f"max={relative_loss_side.max().item()}"
+            )
 
             logger.info(
-                "CEM candidate wrist losses:", relative_loss_wrist.min().item(), relative_loss_wrist.mean().item(), relative_loss_wrist.max().item())
+                f"CEM candidate predicted wrist losses:"
+                f"min={relative_loss_wrist.min().item()}"
+                f"mean={relative_loss_wrist.mean().item()}"
+                f"max={relative_loss_wrist.max().item()}"
+            )
 
         loss = 0.5 * relative_loss_side + 0.5 * relative_loss_wrist
 
@@ -278,9 +286,9 @@ def cem(
 
     if verbose:
         logger.info(
-            "CEM reference goal losses | side=%.6f wrist=%.6f",
-            reference_loss_side.item(),
-            reference_loss_wrist.item(),
+            f"Reference goal losses:"
+            f"side={reference_loss_side.item()}"
+            f"wrist={reference_loss_wrist.item()}"
         )
 
     # INPUTS
