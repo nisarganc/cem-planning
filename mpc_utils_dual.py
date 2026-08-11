@@ -43,20 +43,53 @@ def relative_goal_loss(candidate_loss, reference_loss, eps=1e-6):
 
 def weighted_elite_stats(actions, loss, indices, temperature=0.25):
 
-    # select top-k actions and their corresponding losses
+    # Select top-k actions and corresponding losses.
     selected_actions = actions[indices]
     selected_loss = loss[indices]
 
-    # normalise the selected loss to have zero mean and unit variance
-    # selected_loss = selected_loss - selected_loss.mean() / selected_loss.std(unbiased=False).clamp_min(1e-6)
+    # Normalize the spread of losses within the selected top-k set.
+    loss_std = selected_loss.std(
+        unbiased=False
+    ).clamp_min(1e-6)
 
-    weights = torch.softmax(-selected_loss / temperature, dim=0)
-    view_shape = (weights.size(0),) + (1,) * (selected_actions.dim() - 1)
+    normalized_loss = (
+        selected_loss - selected_loss.min()
+    ) / loss_std
+
+    weights = torch.softmax(
+        -normalized_loss / temperature,
+        dim=0,
+    )
+
+    # # Effective number of selected trajectories contributing.
+    # ess = 1.0 / weights.pow(2).sum()
+
+    # logger.info(
+    #     f"Loss-weighted top-k: "
+    #     f"loss_min={selected_loss.min().item():.4f} "
+    #     f"loss_max={selected_loss.max().item():.4f} "
+    #     f"loss_std={loss_std.item():.6f} "
+    #     f"ESS={ess.item():.2f}/{weights.numel()} "
+    #     f"w_max={weights.max().item():.3f}"
+    # )
+
+    view_shape = (
+        weights.size(0),
+    ) + (1,) * (selected_actions.dim() - 1)
+
     weights = weights.view(view_shape)
 
-    mean = (selected_actions * weights).sum(dim=0)
-    var = ((selected_actions - mean) ** 2 * weights).sum(dim=0)
-    return mean, torch.sqrt(var.clamp_min(1e-8))
+    mean = (
+        selected_actions * weights
+    ).sum(dim=0)
+
+    var = (
+        (selected_actions - mean) ** 2 * weights
+    ).sum(dim=0)
+
+    return mean, torch.sqrt(
+        var.clamp_min(1e-8)
+    )
 
 
 def compute_new_pose(pose, action):
@@ -166,7 +199,7 @@ def cem(
     momentum_std_gripper=0.15,
     samples=100,
     topk=10,
-    verbose=True,
+    verbose=False,
     maxnorm=0.05,
     maxrotnorm=0.314,
     axis={},
@@ -176,7 +209,7 @@ def cem(
     prev_action=None,
     generator=None,
     log=False,
-    elite_temperature=0.5,
+    elite_temperature=0.25,
     relative_loss_eps=1e-6,
 ):
     """
@@ -361,113 +394,23 @@ def cem(
             goal_state_wrist.flatten(1),
         )
 
-        relative_loss_side = relative_goal_loss(
-            loss_side,
-            reference_loss_side,
+        reference_total_loss = reference_loss_side + reference_loss_wrist
+        action_total_loss = loss_side + loss_wrist
+
+
+        loss = relative_goal_loss(
+            action_total_loss,
+            reference_total_loss,
             eps=relative_loss_eps,
-        )
-        relative_loss_wrist = relative_goal_loss(
-            loss_wrist,
-            reference_loss_wrist,
-            eps=relative_loss_eps,
-        )
-
-        side_topk_values = torch.topk(
-            relative_loss_side,
-            topk,
-            largest=False,
-        ).values
-
-        wrist_topk_values = torch.topk(
-            relative_loss_wrist,
-            topk,
-            largest=False,
-        ).values
-
-        side_topk_mean = side_topk_values.mean()
-        wrist_topk_mean = wrist_topk_values.mean()
-
-        side_frac_better = (
-            relative_loss_side < 1.0
-        ).float().mean()
-
-        wrist_frac_better = (
-            relative_loss_wrist < 1.0
-        ).float().mean()
-
-
-        # ---------------------------------------------------------
-        # Dynamic view actionability.
-        # ---------------------------------------------------------
-
-        side_score = (
-            torch.relu(1.0 - side_topk_mean)
-            + 0.1 * side_frac_better
-        )
-
-        wrist_score = (
-            torch.relu(1.0 - wrist_topk_mean)
-            + 0.1 * wrist_frac_better
-        )
-
-
-        # Prior prevents either view from disappearing.
-        prior = 0.2
-
-        side_weight = (
-            side_score + prior
-        ) / (
-            side_score + wrist_score + 2.0 * prior
-        )
-
-        wrist_weight = 1.0 - side_weight
-
-
-        # Conservative bounds.
-        side_weight = torch.clamp(
-            side_weight,
-            0.10,
-            0.90,
-        )
-
-        wrist_weight = 1.0 - side_weight
-
-
-        loss = (
-            side_weight * relative_loss_side
-            + wrist_weight * relative_loss_wrist
         )
 
         if verbose:
-            logger.info(
-                f"CEM candidate predicted side losses: "
-                f"min={relative_loss_side.min().item()} "
-                f"mean={relative_loss_side.mean().item()} "
-                f"max={relative_loss_side.max().item()}"
-            )
-
-            logger.info(
-                f"CEM candidate predicted wrist losses: "
-                f"min={relative_loss_wrist.min().item()} "
-                f"mean={relative_loss_wrist.mean().item()} "
-                f"max={relative_loss_wrist.max().item()}"
-            )
 
             best_idx = loss.argmin()
 
             logger.info(
                 f"CEM best candidate: "
                 f"combined={loss[best_idx].item()} "
-                f"side={relative_loss_side[best_idx].item()} "
-                f"wrist={relative_loss_wrist[best_idx].item()}"
-            )
-
-            logger.info(
-                f"Dynamic view weights: "
-                f"side={side_weight.item():.3f} "
-                f"wrist={wrist_weight.item():.3f} "
-                f"side_score={side_score.item():.4f} "
-                f"wrist_score={wrist_score.item():.4f}"
             )
 
         indices = loss.topk(
@@ -475,27 +418,36 @@ def cem(
             largest=False,
         ).indices
 
-        selected_actions = actions[indices]
+        # selected_actions = actions[indices]
+        # return selected_actions
+    
+        # now obtain mean and var deom elite samples using weighted softmax
+        mean, std = weighted_elite_stats(
+            actions,
+            loss,
+            indices,
+            temperature=elite_temperature,
+        )
 
-        return selected_actions
+        return mean, std
+
+
 
     # ---------------------------------------------------------
     # Diagnostic only:
     # current encoded latent -> goal latent.
     #
-    # We keep logging these to measure predictor-vs-encoder bias,
-    # but they are no longer used as normalization denominators.
     # ---------------------------------------------------------
 
-    encoded_current_loss_side = l1(
-        context_frame["left"].flatten(1),
-        goal_frame_side.flatten(1),
-    ).mean().detach()
+    # encoded_current_loss_side = l1(
+    #     context_frame["left"].flatten(1),
+    #     goal_frame_side.flatten(1),
+    # ).mean().detach()
 
-    encoded_current_loss_wrist = l1(
-        context_frame["wrist"].flatten(1),
-        goal_frame_wrist.flatten(1),
-    ).mean().detach()
+    # encoded_current_loss_wrist = l1(
+    #     context_frame["wrist"].flatten(1),
+    #     goal_frame_wrist.flatten(1),
+    # ).mean().detach()
 
     # ---------------------------------------------------------
     # Zero-action predictor reference:
@@ -524,12 +476,6 @@ def cem(
     ).mean().detach()
 
     if verbose:
-
-        logger.info(
-            f"Encoded current goal losses: "
-            f"side={encoded_current_loss_side.item()} "
-            f"wrist={encoded_current_loss_wrist.item()}"
-        )
 
         logger.info(
             f"Zero-action predicted reference goal losses: "
@@ -625,7 +571,7 @@ def cem(
             torch.ones(
                 (rollout, 1),
                 device=context_frame["left"].device,
-            ),
+            ) * 0.75,
         ],
         dim=-1,
     )
@@ -679,7 +625,7 @@ def cem(
                 f"grip={empirical_std[..., -1:].mean().item()}"
             )
 
-        selected_actions = select_topk_action_traj(
+        mean_selected_actions, std_selected_actions = select_topk_action_traj(
             reference_loss_side=reference_loss_side,
             reference_loss_wrist=reference_loss_wrist,
             final_state_side=frame_traj_side[:, -1],
@@ -689,12 +635,12 @@ def cem(
             actions=action_traj,
         )
 
-        mean_selected_actions = selected_actions.mean(
-            dim=0,
-        )
-        std_selected_actions = selected_actions.std(
-            dim=0,
-        )
+        # mean_selected_actions = selected_actions.mean(
+        #     dim=0,
+        # )
+        # std_selected_actions = selected_actions.std(
+        #     dim=0,
+        # )
 
         mean = torch.cat(
             [
@@ -762,7 +708,14 @@ def cem(
     # Return the mean of the final proposal.
     # ---------------------------------------------------------
 
-    new_action = mean
+    new_action = torch.cat(
+        [
+            mean[..., :3],
+            round_small_elements(mean[..., 3:6], 0.05),
+            mean[..., -1:],
+        ],
+        dim=-1,
+    )
 
     if log:
 
