@@ -212,8 +212,8 @@ def cem(
     relative_loss_eps=1e-6,
 ):
     """
-    :param context_obs: {"left": [H, W, 3], "wrist": [H, W, 3]}
-    :param context_frame: {"left": [B=1, T=1, HW, D], "wrist": [B=1, T=1, HW, D]}
+    :param context_obs: [H, W, 3]
+    :param context_frame: [B=1, T=1, HW, D]
     :param goal_frame: [B=1, T=1, HW, D]
     :param world_model: f(context_frame, action) -> next_frame [B, 1, HW, D]
     :return: [B=1, rollout, 7] an action trajectory over rollout horizon
@@ -323,6 +323,8 @@ def cem(
                     [action_traj, zero_action],
                     dim=1,
                 )
+                if action_traj is not None
+                else zero_action
             )
 
             next_frame, next_pose = world_model(
@@ -350,7 +352,7 @@ def cem(
         goal_state,
         actions,
     ):
-        """Select elites using combined scale-normalized dual-view cost."""
+        """Select elites using scale-normalized single-view cost."""
 
         absolute_loss = l1(
             final_state.flatten(1),
@@ -412,11 +414,13 @@ def cem(
     # horizon as the candidate trajectories.
     # ---------------------------------------------------------
 
-    zero_final = rollout_zero_action_reference(
+    zero_final = (
+        rollout_zero_action_reference(
             context_obs,
             context_frame,
             context_pose,
         )
+    )
 
     reference_loss = l1(
         zero_final.flatten(1),
@@ -466,26 +470,26 @@ def cem(
 
     mean = torch.zeros(
         (rollout, 7),
-        device=context_frame["left"].device,
+        device=context_frame.device,
     )
 
     std = torch.cat(
         [
             torch.ones(
                 (rollout, 3),
-                device=context_frame["left"].device,
+                device=context_frame.device,
             )
             * maxnorm,
             torch.ones(
                 (rollout, 3),
-                device=context_frame["left"].device,
+                device=context_frame.device,
             )
             * maxrotnorm,
             # gripper still needs std up to 1.0
             # to explore open/close actions
             torch.ones(
                 (rollout, 1),
-                device=context_frame["left"].device,
+                device=context_frame.device,
             ) * 0.75,
         ],
         dim=-1,
@@ -637,7 +641,8 @@ def cem(
         for h in range(rollout):
 
             next_frame, next_pose = world_model(
-                context_obs,
+                context_obs[:1],
+                frame_traj,
                 new_action[:, : h + 1],
                 pose_traj,
                 h == (rollout - 1),
