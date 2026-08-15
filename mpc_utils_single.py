@@ -28,6 +28,15 @@ def round_small_elements(tensor, threshold):
     new_tensor[mask] = 0
     return new_tensor
 
+def round_rotation_elements(rot, threshold):
+    rot_norm = rot.norm(dim=-1, keepdim=True)
+    new_rot = torch.where(
+        rot_norm < threshold,
+        torch.zeros_like(rot),
+        rot,
+    )
+    return new_rot
+
 
 def relative_goal_loss(candidate_loss, reference_loss, eps=1e-6):
     """Normalize candidate goal loss by a fixed predicted no-op goal loss.
@@ -198,17 +207,17 @@ def cem(
     momentum_std_gripper=0.15,
     samples=100,
     topk=10,
+    elite_temperature=0.25,
     verbose=False,
     maxnorm=0.05,
     maxrotnorm=0.314,
+    maxgrippernorm=0.75,
     axis={},
     objective="l1",
     warm_starting=False,
-    close_gripper=None,
     prev_action=None,
     generator=None,
     log=False,
-    elite_temperature=0.25,
     relative_loss_eps=1e-6,
 ):
     """
@@ -258,9 +267,6 @@ def cem(
 
             action_samples = action_samples[:, None]
 
-            if close_gripper is not None and h >= close_gripper:
-                action_samples[:, :, -1] = 1.0
-
             action_traj = (
                 torch.cat(
                     [action_traj, action_samples],
@@ -302,8 +308,6 @@ def cem(
         This produces a reference on the same predictor-output distribution
         and at the same rollout horizon as the CEM candidates.
 
-        close_gripper and fixed-axis overrides are intentionally not applied:
-        this is a true no-op action trajectory.
         """
 
         action_traj = None
@@ -485,12 +489,10 @@ def cem(
                 device=context_frame.device,
             )
             * maxrotnorm,
-            # gripper still needs std up to 1.0
-            # to explore open/close actions
             torch.ones(
                 (rollout, 1),
                 device=context_frame.device,
-            ) * 0.75,
+            ) * maxgrippernorm,
         ],
         dim=-1,
     )
@@ -627,8 +629,8 @@ def cem(
     new_action = torch.cat(
         [
             mean[..., :3],
-            round_small_elements(mean[..., 3:6], 0.05),
-            mean[..., -1:],
+            round_small_elements(mean[..., 3:6], 0.04),
+            round_small_elements(mean[..., -1:], 0.15),
         ],
         dim=-1,
     )
@@ -659,11 +661,11 @@ def cem(
                 dim=1,
             )
 
-    logger.info(
-    f"Executed action: "
-    f"xyz={new_action[0, :3].tolist()} "
-    f"rot={new_action[0, 3:6].tolist()} "
-    f"grip={new_action[0, 6].item()}"
-    )
+    # logger.info(
+    # f"Executed action: "
+    # f"xyz={new_action[0, :3].tolist()} "
+    # f"rot={new_action[0, 3:6].tolist()} "
+    # f"grip={new_action[0, 6].item()}"
+    # )
 
     return new_action
